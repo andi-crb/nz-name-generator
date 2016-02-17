@@ -22,9 +22,9 @@ var port = server.address().port;
 // });
 
 app.get('/namebykey/:key', function(req, res){
-  console.log(req.params)
+  // console.log(req.params)
   // console.log(res)
-  res.json(data.nameObjects[0][req.params.key])
+  res.json(data.nameObjects[0][req.params.key].name)
   // res.send(res.nameObjects[0][key]);
 
 });

@@ -1,3 +1,16 @@
+/*Colours: 59323C, 260126, F2EEB3,  BFAF80, 8C6954;   */
+
 body {
-  background-color: green;
+  background-color: #F2EEB3;
+
+}
+
+h1 {
+  background-color: #260126;
+  color: #F2EEB3;
+  text-align: center;
+}
+
+p {
+  color: #260126;
 }

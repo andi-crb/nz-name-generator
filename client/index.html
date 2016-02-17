@@ -3,6 +3,7 @@
 <head>
   <link rel="stylesheet" href="./css/styles.css">
   <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.2.0/jquery.min.js"></script>
+  <script src="bundle.js"></script>
   <title>Name Generator</title>
 </head>
 <body>
@@ -80,7 +81,7 @@
       </select>
     .</p>
     <button onclick="getName(year.value, gender.value)">Get a name!</button>
-  <p><img src="./images/people.jpg"></p>
+    <p id="suggestion"></p>
   <p>Disclaimer: This generator is intended as a source of ideas only, and accuracy cannot be guaranteed. It is based on legal names and gender assignments at (or shortly after!) birth, and cannot adequately take account of variations by ethnicity, location, and the myriad of other factors that influence name choice. This was created as a personal course project using data available from the Department of Internal Affairs.</p>
 </body>
 </html>
