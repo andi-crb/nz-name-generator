@@ -10,12 +10,14 @@
     "express": "^4.13.4",
     "nodemon": "^1.8.1",
     "promise": "^7.1.1",
-    "superagent": "^1.7.2"
+    "superagent": "^1.7.2",
+    "uglifyify": "^3.0.1"
   },
   "devDependencies": {},
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "budo ./lib/app.js -d ./client/ --serve bundle.js --live",
+    "server": "node server.js",
+    "build": "watchify ./lib/app.js -o ./client/bundle.js -v"
   },
   "repository": {
     "type": "git",

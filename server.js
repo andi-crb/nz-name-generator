@@ -1,7 +1,10 @@
 var express = require('express');
 var app = express();
 var path = require('path');
-var data = require('./data/db.json')
+var data = require('./data/db.json');
+var cors = require('cors')
+
+app.use(cors());
 
 
 // Define the port to run on
