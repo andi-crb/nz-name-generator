@@ -18,7 +18,7 @@ exports.getData = function(key) {
 }
 
 // getData("m201587")
-},{"promise":4,"superagent":14}],2:[function(require,module,exports){
+},{"promise":7,"superagent":16}],2:[function(require,module,exports){
 
 var getData = require("./ajax.js").getData
 var exports = module.exports = {};
@@ -38,6 +38,7 @@ getName = function(year, gender) {
     }
     var num = [Math.floor(Math.random()*100)]
     var key = genderMarker + year + num;
+    // console.log(key)
     resolve(key)
     // console.log("name",finalName)
   })  
@@ -45,17 +46,20 @@ getName = function(year, gender) {
 
 printName = function(name) {  
   return new Promise(function(resolve, reject){
+    // console.log(name)
     document.getElementById("suggestion").innerHTML = name;
     resolve(name)
   })
 }
 
-function completeNameReq(year, gender){
+completeNameReq = function(year, gender){
+  console.log("called function")
   getName(year, gender)
   .then(function(data){
     getData(data)
     .then(function(data){
       printName(data)
+      console.log(3, data)
     })
     .catch(handleError)
   })
@@ -63,11 +67,466 @@ function completeNameReq(year, gender){
 // })
 }
 
+},{"./ajax.js":1,"jquery":6}],3:[function(require,module,exports){
+"use strict";
 
-completeNameReq("2015", "female")
-},{"./ajax.js":1,"jquery":3}],3:[function(require,module,exports){
+// rawAsap provides everything we need except exception management.
+var rawAsap = require("./raw");
+// RawTasks are recycled to reduce GC churn.
+var freeTasks = [];
+// We queue errors to ensure they are thrown in right order (FIFO).
+// Array-as-queue is good enough here, since we are just dealing with exceptions.
+var pendingErrors = [];
+var requestErrorThrow = rawAsap.makeRequestCallFromTimer(throwFirstError);
+
+function throwFirstError() {
+    if (pendingErrors.length) {
+        throw pendingErrors.shift();
+    }
+}
+
+/**
+ * Calls a task as soon as possible after returning, in its own event, with priority
+ * over other events like animation, reflow, and repaint. An error thrown from an
+ * event will not interrupt, nor even substantially slow down the processing of
+ * other events, but will be rather postponed to a lower priority event.
+ * @param {{call}} task A callable object, typically a function that takes no
+ * arguments.
+ */
+module.exports = asap;
+function asap(task) {
+    var rawTask;
+    if (freeTasks.length) {
+        rawTask = freeTasks.pop();
+    } else {
+        rawTask = new RawTask();
+    }
+    rawTask.task = task;
+    rawAsap(rawTask);
+}
+
+// We wrap tasks with recyclable task objects.  A task object implements
+// `call`, just like a function.
+function RawTask() {
+    this.task = null;
+}
+
+// The sole purpose of wrapping the task is to catch the exception and recycle
+// the task object after its single use.
+RawTask.prototype.call = function () {
+    try {
+        this.task.call();
+    } catch (error) {
+        if (asap.onerror) {
+            // This hook exists purely for testing purposes.
+            // Its name will be periodically randomized to break any code that
+            // depends on its existence.
+            asap.onerror(error);
+        } else {
+            // In a web browser, exceptions are not fatal. However, to avoid
+            // slowing down the queue of pending tasks, we rethrow the error in a
+            // lower priority turn.
+            pendingErrors.push(error);
+            requestErrorThrow();
+        }
+    } finally {
+        this.task = null;
+        freeTasks[freeTasks.length] = this;
+    }
+};
+
+},{"./raw":4}],4:[function(require,module,exports){
+(function (global){
+"use strict";
+
+// Use the fastest means possible to execute a task in its own turn, with
+// priority over other events including IO, animation, reflow, and redraw
+// events in browsers.
+//
+// An exception thrown by a task will permanently interrupt the processing of
+// subsequent tasks. The higher level `asap` function ensures that if an
+// exception is thrown by a task, that the task queue will continue flushing as
+// soon as possible, but if you use `rawAsap` directly, you are responsible to
+// either ensure that no exceptions are thrown from your task, or to manually
+// call `rawAsap.requestFlush` if an exception is thrown.
+module.exports = rawAsap;
+function rawAsap(task) {
+    if (!queue.length) {
+        requestFlush();
+        flushing = true;
+    }
+    // Equivalent to push, but avoids a function call.
+    queue[queue.length] = task;
+}
+
+var queue = [];
+// Once a flush has been requested, no further calls to `requestFlush` are
+// necessary until the next `flush` completes.
+var flushing = false;
+// `requestFlush` is an implementation-specific method that attempts to kick
+// off a `flush` event as quickly as possible. `flush` will attempt to exhaust
+// the event queue before yielding to the browser's own event loop.
+var requestFlush;
+// The position of the next task to execute in the task queue. This is
+// preserved between calls to `flush` so that it can be resumed if
+// a task throws an exception.
+var index = 0;
+// If a task schedules additional tasks recursively, the task queue can grow
+// unbounded. To prevent memory exhaustion, the task queue will periodically
+// truncate already-completed tasks.
+var capacity = 1024;
+
+// The flush function processes all tasks that have been scheduled with
+// `rawAsap` unless and until one of those tasks throws an exception.
+// If a task throws an exception, `flush` ensures that its state will remain
+// consistent and will resume where it left off when called again.
+// However, `flush` does not make any arrangements to be called again if an
+// exception is thrown.
+function flush() {
+    while (index < queue.length) {
+        var currentIndex = index;
+        // Advance the index before calling the task. This ensures that we will
+        // begin flushing on the next task the task throws an error.
+        index = index + 1;
+        queue[currentIndex].call();
+        // Prevent leaking memory for long chains of recursive calls to `asap`.
+        // If we call `asap` within tasks scheduled by `asap`, the queue will
+        // grow, but to avoid an O(n) walk for every task we execute, we don't
+        // shift tasks off the queue after they have been executed.
+        // Instead, we periodically shift 1024 tasks off the queue.
+        if (index > capacity) {
+            // Manually shift all values starting at the index back to the
+            // beginning of the queue.
+            for (var scan = 0, newLength = queue.length - index; scan < newLength; scan++) {
+                queue[scan] = queue[scan + index];
+            }
+            queue.length -= index;
+            index = 0;
+        }
+    }
+    queue.length = 0;
+    index = 0;
+    flushing = false;
+}
+
+// `requestFlush` is implemented using a strategy based on data collected from
+// every available SauceLabs Selenium web driver worker at time of writing.
+// https://docs.google.com/spreadsheets/d/1mG-5UYGup5qxGdEMWkhP6BWCz053NUb2E1QoUTU16uA/edit#gid=783724593
+
+// Safari 6 and 6.1 for desktop, iPad, and iPhone are the only browsers that
+// have WebKitMutationObserver but not un-prefixed MutationObserver.
+// Must use `global` instead of `window` to work in both frames and web
+// workers. `global` is a provision of Browserify, Mr, Mrs, or Mop.
+var BrowserMutationObserver = global.MutationObserver || global.WebKitMutationObserver;
+
+// MutationObservers are desirable because they have high priority and work
+// reliably everywhere they are implemented.
+// They are implemented in all modern browsers.
+//
+// - Android 4-4.3
+// - Chrome 26-34
+// - Firefox 14-29
+// - Internet Explorer 11
+// - iPad Safari 6-7.1
+// - iPhone Safari 7-7.1
+// - Safari 6-7
+if (typeof BrowserMutationObserver === "function") {
+    requestFlush = makeRequestCallFromMutationObserver(flush);
+
+// MessageChannels are desirable because they give direct access to the HTML
+// task queue, are implemented in Internet Explorer 10, Safari 5.0-1, and Opera
+// 11-12, and in web workers in many engines.
+// Although message channels yield to any queued rendering and IO tasks, they
+// would be better than imposing the 4ms delay of timers.
+// However, they do not work reliably in Internet Explorer or Safari.
+
+// Internet Explorer 10 is the only browser that has setImmediate but does
+// not have MutationObservers.
+// Although setImmediate yields to the browser's renderer, it would be
+// preferrable to falling back to setTimeout since it does not have
+// the minimum 4ms penalty.
+// Unfortunately there appears to be a bug in Internet Explorer 10 Mobile (and
+// Desktop to a lesser extent) that renders both setImmediate and
+// MessageChannel useless for the purposes of ASAP.
+// https://github.com/kriskowal/q/issues/396
+
+// Timers are implemented universally.
+// We fall back to timers in workers in most engines, and in foreground
+// contexts in the following browsers.
+// However, note that even this simple case requires nuances to operate in a
+// broad spectrum of browsers.
+//
+// - Firefox 3-13
+// - Internet Explorer 6-9
+// - iPad Safari 4.3
+// - Lynx 2.8.7
+} else {
+    requestFlush = makeRequestCallFromTimer(flush);
+}
+
+// `requestFlush` requests that the high priority event queue be flushed as
+// soon as possible.
+// This is useful to prevent an error thrown in a task from stalling the event
+// queue if the exception handled by Node.js’s
+// `process.on("uncaughtException")` or by a domain.
+rawAsap.requestFlush = requestFlush;
+
+// To request a high priority event, we induce a mutation observer by toggling
+// the text of a text node between "1" and "-1".
+function makeRequestCallFromMutationObserver(callback) {
+    var toggle = 1;
+    var observer = new BrowserMutationObserver(callback);
+    var node = document.createTextNode("");
+    observer.observe(node, {characterData: true});
+    return function requestCall() {
+        toggle = -toggle;
+        node.data = toggle;
+    };
+}
+
+// The message channel technique was discovered by Malte Ubl and was the
+// original foundation for this library.
+// http://www.nonblocking.io/2011/06/windownexttick.html
+
+// Safari 6.0.5 (at least) intermittently fails to create message ports on a
+// page's first load. Thankfully, this version of Safari supports
+// MutationObservers, so we don't need to fall back in that case.
+
+// function makeRequestCallFromMessageChannel(callback) {
+//     var channel = new MessageChannel();
+//     channel.port1.onmessage = callback;
+//     return function requestCall() {
+//         channel.port2.postMessage(0);
+//     };
+// }
+
+// For reasons explained above, we are also unable to use `setImmediate`
+// under any circumstances.
+// Even if we were, there is another bug in Internet Explorer 10.
+// It is not sufficient to assign `setImmediate` to `requestFlush` because
+// `setImmediate` must be called *by name* and therefore must be wrapped in a
+// closure.
+// Never forget.
+
+// function makeRequestCallFromSetImmediate(callback) {
+//     return function requestCall() {
+//         setImmediate(callback);
+//     };
+// }
+
+// Safari 6.0 has a problem where timers will get lost while the user is
+// scrolling. This problem does not impact ASAP because Safari 6.0 supports
+// mutation observers, so that implementation is used instead.
+// However, if we ever elect to use timers in Safari, the prevalent work-around
+// is to add a scroll event listener that calls for a flush.
+
+// `setTimeout` does not call the passed callback if the delay is less than
+// approximately 7 in web workers in Firefox 8 through 18, and sometimes not
+// even then.
+
+function makeRequestCallFromTimer(callback) {
+    return function requestCall() {
+        // We dispatch a timeout with a specified delay of 0 for engines that
+        // can reliably accommodate that request. This will usually be snapped
+        // to a 4 milisecond delay, but once we're flushing, there's no delay
+        // between events.
+        var timeoutHandle = setTimeout(handleTimer, 0);
+        // However, since this timer gets frequently dropped in Firefox
+        // workers, we enlist an interval handle that will try to fire
+        // an event 20 times per second until it succeeds.
+        var intervalHandle = setInterval(handleTimer, 50);
+
+        function handleTimer() {
+            // Whichever timer succeeds will cancel both timers and
+            // execute the callback.
+            clearTimeout(timeoutHandle);
+            clearInterval(intervalHandle);
+            callback();
+        }
+    };
+}
+
+// This is for `asap.js` only.
+// Its name will be periodically randomized to break any code that depends on
+// its existence.
+rawAsap.makeRequestCallFromTimer = makeRequestCallFromTimer;
+
+// ASAP was originally a nextTick shim included in Q. This was factored out
+// into this ASAP package. It was later adapted to RSVP which made further
+// amendments. These decisions, particularly to marginalize MessageChannel and
+// to capture the MutationObserver implementation in a closure, were integrated
+// back into ASAP proper.
+// https://github.com/tildeio/rsvp.js/blob/cddf7232546a9cf858524b75cde6f9edf72620a7/lib/rsvp/asap.js
+
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],5:[function(require,module,exports){
+
+/**
+ * Expose `Emitter`.
+ */
+
+if (typeof module !== 'undefined') {
+  module.exports = Emitter;
+}
+
+/**
+ * Initialize a new `Emitter`.
+ *
+ * @api public
+ */
+
+function Emitter(obj) {
+  if (obj) return mixin(obj);
+};
+
+/**
+ * Mixin the emitter properties.
+ *
+ * @param {Object} obj
+ * @return {Object}
+ * @api private
+ */
+
+function mixin(obj) {
+  for (var key in Emitter.prototype) {
+    obj[key] = Emitter.prototype[key];
+  }
+  return obj;
+}
+
+/**
+ * Listen on the given `event` with `fn`.
+ *
+ * @param {String} event
+ * @param {Function} fn
+ * @return {Emitter}
+ * @api public
+ */
+
+Emitter.prototype.on =
+Emitter.prototype.addEventListener = function(event, fn){
+  this._callbacks = this._callbacks || {};
+  (this._callbacks['$' + event] = this._callbacks['$' + event] || [])
+    .push(fn);
+  return this;
+};
+
+/**
+ * Adds an `event` listener that will be invoked a single
+ * time then automatically removed.
+ *
+ * @param {String} event
+ * @param {Function} fn
+ * @return {Emitter}
+ * @api public
+ */
+
+Emitter.prototype.once = function(event, fn){
+  function on() {
+    this.off(event, on);
+    fn.apply(this, arguments);
+  }
+
+  on.fn = fn;
+  this.on(event, on);
+  return this;
+};
+
+/**
+ * Remove the given callback for `event` or all
+ * registered callbacks.
+ *
+ * @param {String} event
+ * @param {Function} fn
+ * @return {Emitter}
+ * @api public
+ */
+
+Emitter.prototype.off =
+Emitter.prototype.removeListener =
+Emitter.prototype.removeAllListeners =
+Emitter.prototype.removeEventListener = function(event, fn){
+  this._callbacks = this._callbacks || {};
+
+  // all
+  if (0 == arguments.length) {
+    this._callbacks = {};
+    return this;
+  }
+
+  // specific event
+  var callbacks = this._callbacks['$' + event];
+  if (!callbacks) return this;
+
+  // remove all handlers
+  if (1 == arguments.length) {
+    delete this._callbacks['$' + event];
+    return this;
+  }
+
+  // remove specific handler
+  var cb;
+  for (var i = 0; i < callbacks.length; i++) {
+    cb = callbacks[i];
+    if (cb === fn || cb.fn === fn) {
+      callbacks.splice(i, 1);
+      break;
+    }
+  }
+  return this;
+};
+
+/**
+ * Emit `event` with the given args.
+ *
+ * @param {String} event
+ * @param {Mixed} ...
+ * @return {Emitter}
+ */
+
+Emitter.prototype.emit = function(event){
+  this._callbacks = this._callbacks || {};
+  var args = [].slice.call(arguments, 1)
+    , callbacks = this._callbacks['$' + event];
+
+  if (callbacks) {
+    callbacks = callbacks.slice(0);
+    for (var i = 0, len = callbacks.length; i < len; ++i) {
+      callbacks[i].apply(this, args);
+    }
+  }
+
+  return this;
+};
+
+/**
+ * Return array of callbacks for `event`.
+ *
+ * @param {String} event
+ * @return {Array}
+ * @api public
+ */
+
+Emitter.prototype.listeners = function(event){
+  this._callbacks = this._callbacks || {};
+  return this._callbacks['$' + event] || [];
+};
+
+/**
+ * Check if this emitter has `event` handlers.
+ *
+ * @param {String} event
+ * @return {Boolean}
+ * @api public
+ */
+
+Emitter.prototype.hasListeners = function(event){
+  return !! this.listeners(event).length;
+};
+
+},{}],6:[function(require,module,exports){
 /*!
- * jQuery JavaScript Library v2.2.0
+ * jQuery JavaScript Library v2.2.3
  * http://jquery.com/
  *
  * Includes Sizzle.js
@@ -77,7 +536,7 @@ completeNameReq("2015", "female")
  * Released under the MIT license
  * http://jquery.org/license
  *
- * Date: 2016-01-08T20:02Z
+ * Date: 2016-04-05T19:26Z
  */
 
 (function( global, factory ) {
@@ -133,7 +592,7 @@ var support = {};
 
 
 var
-	version = "2.2.0",
+	version = "2.2.3",
 
 	// Define a local copy of jQuery
 	jQuery = function( selector, context ) {
@@ -344,6 +803,7 @@ jQuery.extend( {
 	},
 
 	isPlainObject: function( obj ) {
+		var key;
 
 		// Not plain objects:
 		// - Any object or value whose internal [[Class]] property is not "[object Object]"
@@ -353,14 +813,18 @@ jQuery.extend( {
 			return false;
 		}
 
+		// Not own constructor property must be Object
 		if ( obj.constructor &&
-				!hasOwn.call( obj.constructor.prototype, "isPrototypeOf" ) ) {
+				!hasOwn.call( obj, "constructor" ) &&
+				!hasOwn.call( obj.constructor.prototype || {}, "isPrototypeOf" ) ) {
 			return false;
 		}
 
-		// If the function hasn't returned already, we're confident that
-		// |obj| is a plain object, created by {} or constructed with new Object
-		return true;
+		// Own properties are enumerated firstly, so to speed up,
+		// if last one is own, then all properties are own
+		for ( key in obj ) {}
+
+		return key === undefined || hasOwn.call( obj, key );
 	},
 
 	isEmptyObject: function( obj ) {
@@ -4547,7 +5011,7 @@ function on( elem, types, selector, data, fn, one ) {
 	if ( fn === false ) {
 		fn = returnFalse;
 	} else if ( !fn ) {
-		return this;
+		return elem;
 	}
 
 	if ( one === 1 ) {
@@ -5196,14 +5660,14 @@ var
 	rscriptTypeMasked = /^true\/(.*)/,
 	rcleanScript = /^\s*<!(?:\[CDATA\[|--)|(?:\]\]|--)>\s*$/g;
 
+// Manipulating tables requires a tbody
 function manipulationTarget( elem, content ) {
-	if ( jQuery.nodeName( elem, "table" ) &&
-		jQuery.nodeName( content.nodeType !== 11 ? content : content.firstChild, "tr" ) ) {
+	return jQuery.nodeName( elem, "table" ) &&
+		jQuery.nodeName( content.nodeType !== 11 ? content : content.firstChild, "tr" ) ?
 
-		return elem.getElementsByTagName( "tbody" )[ 0 ] || elem;
-	}
-
-	return elem;
+		elem.getElementsByTagName( "tbody" )[ 0 ] ||
+			elem.appendChild( elem.ownerDocument.createElement( "tbody" ) ) :
+		elem;
 }
 
 // Replace/restore the type attribute of script elements for safe DOM manipulation
@@ -5710,7 +6174,7 @@ var getStyles = function( elem ) {
 		// FF meanwhile throws on frame elements through "defaultView.getComputedStyle"
 		var view = elem.ownerDocument.defaultView;
 
-		if ( !view.opener ) {
+		if ( !view || !view.opener ) {
 			view = window;
 		}
 
@@ -5859,15 +6323,18 @@ function curCSS( elem, name, computed ) {
 		style = elem.style;
 
 	computed = computed || getStyles( elem );
+	ret = computed ? computed.getPropertyValue( name ) || computed[ name ] : undefined;
+
+	// Support: Opera 12.1x only
+	// Fall back to style even without computed
+	// computed is undefined for elems on document fragments
+	if ( ( ret === "" || ret === undefined ) && !jQuery.contains( elem.ownerDocument, elem ) ) {
+		ret = jQuery.style( elem, name );
+	}
 
 	// Support: IE9
 	// getPropertyValue is only needed for .css('filter') (#12537)
 	if ( computed ) {
-		ret = computed.getPropertyValue( name ) || computed[ name ];
-
-		if ( ret === "" && !jQuery.contains( elem.ownerDocument, elem ) ) {
-			ret = jQuery.style( elem, name );
-		}
 
 		// A tribute to the "awesome hack by Dean Edwards"
 		// Android Browser returns percentage for some values,
@@ -7390,6 +7857,12 @@ jQuery.extend( {
 	}
 } );
 
+// Support: IE <=11 only
+// Accessing the selectedIndex property
+// forces the browser to respect setting selected
+// on the option
+// The getter ensures a default option is selected
+// when in an optgroup
 if ( !support.optSelected ) {
 	jQuery.propHooks.selected = {
 		get: function( elem ) {
@@ -7398,6 +7871,16 @@ if ( !support.optSelected ) {
 				parent.parentNode.selectedIndex;
 			}
 			return null;
+		},
+		set: function( elem ) {
+			var parent = elem.parentNode;
+			if ( parent ) {
+				parent.selectedIndex;
+
+				if ( parent.parentNode ) {
+					parent.parentNode.selectedIndex;
+				}
+			}
 		}
 	};
 }
@@ -7592,7 +8075,8 @@ jQuery.fn.extend( {
 
 
 
-var rreturn = /\r/g;
+var rreturn = /\r/g,
+	rspaces = /[\x20\t\r\n\f]+/g;
 
 jQuery.fn.extend( {
 	val: function( value ) {
@@ -7668,9 +8152,15 @@ jQuery.extend( {
 		option: {
 			get: function( elem ) {
 
-				// Support: IE<11
-				// option.value not trimmed (#14858)
-				return jQuery.trim( elem.value );
+				var val = jQuery.find.attr( elem, "value" );
+				return val != null ?
+					val :
+
+					// Support: IE10-11+
+					// option.text throws exceptions (#14686, #14858)
+					// Strip and collapse whitespace
+					// https://html.spec.whatwg.org/#strip-and-collapse-whitespace
+					jQuery.trim( jQuery.text( elem ) ).replace( rspaces, " " );
 			}
 		},
 		select: {
@@ -7723,7 +8213,7 @@ jQuery.extend( {
 				while ( i-- ) {
 					option = options[ i ];
 					if ( option.selected =
-							jQuery.inArray( jQuery.valHooks.option.get( option ), values ) > -1
+						jQuery.inArray( jQuery.valHooks.option.get( option ), values ) > -1
 					) {
 						optionSet = true;
 					}
@@ -7917,7 +8407,7 @@ jQuery.extend( jQuery.event, {
 				// But now, this "simulate" function is used only for events
 				// for which stopPropagation() is noop, so there is no need for that anymore.
 				//
-				// For the compat branch though, guard for "click" and "submit"
+				// For the 1.x branch though, guard for "click" and "submit"
 				// events is still used, but was moved to jQuery.event.stopPropagation function
 				// because `originalEvent` should point to the original event for the constancy
 				// with other events and for more focused logic
@@ -9418,18 +9908,6 @@ jQuery.ajaxPrefilter( "json jsonp", function( s, originalSettings, jqXHR ) {
 
 
 
-// Support: Safari 8+
-// In Safari 8 documents created via document.implementation.createHTMLDocument
-// collapse sibling forms: the second one becomes a child of the first one.
-// Because of that, this security measure has to be disabled in Safari 8.
-// https://bugs.webkit.org/show_bug.cgi?id=137337
-support.createHTMLDocument = ( function() {
-	var body = document.implementation.createHTMLDocument( "" ).body;
-	body.innerHTML = "<form></form><form></form>";
-	return body.childNodes.length === 2;
-} )();
-
-
 // Argument "data" should be string of html
 // context (optional): If specified, the fragment will be created in this context,
 // defaults to document
@@ -9442,12 +9920,7 @@ jQuery.parseHTML = function( data, context, keepScripts ) {
 		keepScripts = context;
 		context = false;
 	}
-
-	// Stop scripts or inline event handlers from being executed immediately
-	// by using document.implementation
-	context = context || ( support.createHTMLDocument ?
-		document.implementation.createHTMLDocument( "" ) :
-		document );
+	context = context || document;
 
 	var parsed = rsingleTag.exec( data ),
 		scripts = !keepScripts && [];
@@ -9529,7 +10002,7 @@ jQuery.fn.load = function( url, params, callback ) {
 		// If it fails, this function gets "jqXHR", "status", "error"
 		} ).always( callback && function( jqXHR, status ) {
 			self.each( function() {
-				callback.apply( self, response || [ jqXHR.responseText, status, jqXHR ] );
+				callback.apply( this, response || [ jqXHR.responseText, status, jqXHR ] );
 			} );
 		} );
 	}
@@ -9687,11 +10160,8 @@ jQuery.fn.extend( {
 			}
 
 			// Add offsetParent borders
-			// Subtract offsetParent scroll positions
-			parentOffset.top += jQuery.css( offsetParent[ 0 ], "borderTopWidth", true ) -
-				offsetParent.scrollTop();
-			parentOffset.left += jQuery.css( offsetParent[ 0 ], "borderLeftWidth", true ) -
-				offsetParent.scrollLeft();
+			parentOffset.top += jQuery.css( offsetParent[ 0 ], "borderTopWidth", true );
+			parentOffset.left += jQuery.css( offsetParent[ 0 ], "borderLeftWidth", true );
 		}
 
 		// Subtract parent offsets and element margins
@@ -9898,12 +10368,12 @@ if ( !noGlobal ) {
 return jQuery;
 }));
 
-},{}],4:[function(require,module,exports){
+},{}],7:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./lib')
 
-},{"./lib":9}],5:[function(require,module,exports){
+},{"./lib":12}],8:[function(require,module,exports){
 'use strict';
 
 var asap = require('asap/raw');
@@ -10118,7 +10588,7 @@ function doResolve(fn, promise) {
   }
 }
 
-},{"asap/raw":13}],6:[function(require,module,exports){
+},{"asap/raw":4}],9:[function(require,module,exports){
 'use strict';
 
 var Promise = require('./core.js');
@@ -10133,7 +10603,7 @@ Promise.prototype.done = function (onFulfilled, onRejected) {
   });
 };
 
-},{"./core.js":5}],7:[function(require,module,exports){
+},{"./core.js":8}],10:[function(require,module,exports){
 'use strict';
 
 //This file contains the ES6 extensions to the core Promises/A+ API
@@ -10242,7 +10712,7 @@ Promise.prototype['catch'] = function (onRejected) {
   return this.then(null, onRejected);
 };
 
-},{"./core.js":5}],8:[function(require,module,exports){
+},{"./core.js":8}],11:[function(require,module,exports){
 'use strict';
 
 var Promise = require('./core.js');
@@ -10260,7 +10730,7 @@ Promise.prototype['finally'] = function (f) {
   });
 };
 
-},{"./core.js":5}],9:[function(require,module,exports){
+},{"./core.js":8}],12:[function(require,module,exports){
 'use strict';
 
 module.exports = require('./core.js');
@@ -10270,7 +10740,7 @@ require('./es6-extensions.js');
 require('./node-extensions.js');
 require('./synchronous.js');
 
-},{"./core.js":5,"./done.js":6,"./es6-extensions.js":7,"./finally.js":8,"./node-extensions.js":10,"./synchronous.js":11}],10:[function(require,module,exports){
+},{"./core.js":8,"./done.js":9,"./es6-extensions.js":10,"./finally.js":11,"./node-extensions.js":13,"./synchronous.js":14}],13:[function(require,module,exports){
 'use strict';
 
 // This file contains then/promise specific extensions that are only useful
@@ -10402,7 +10872,7 @@ Promise.prototype.nodeify = function (callback, ctx) {
   });
 }
 
-},{"./core.js":5,"asap":12}],11:[function(require,module,exports){
+},{"./core.js":8,"asap":3}],14:[function(require,module,exports){
 'use strict';
 
 var Promise = require('./core.js');
@@ -10466,305 +10936,40 @@ Promise.disableSynchronous = function() {
   Promise.prototype.getState = undefined;
 };
 
-},{"./core.js":5}],12:[function(require,module,exports){
-"use strict";
-
-// rawAsap provides everything we need except exception management.
-var rawAsap = require("./raw");
-// RawTasks are recycled to reduce GC churn.
-var freeTasks = [];
-// We queue errors to ensure they are thrown in right order (FIFO).
-// Array-as-queue is good enough here, since we are just dealing with exceptions.
-var pendingErrors = [];
-var requestErrorThrow = rawAsap.makeRequestCallFromTimer(throwFirstError);
-
-function throwFirstError() {
-    if (pendingErrors.length) {
-        throw pendingErrors.shift();
-    }
-}
+},{"./core.js":8}],15:[function(require,module,exports){
 
 /**
- * Calls a task as soon as possible after returning, in its own event, with priority
- * over other events like animation, reflow, and repaint. An error thrown from an
- * event will not interrupt, nor even substantially slow down the processing of
- * other events, but will be rather postponed to a lower priority event.
- * @param {{call}} task A callable object, typically a function that takes no
- * arguments.
+ * Reduce `arr` with `fn`.
+ *
+ * @param {Array} arr
+ * @param {Function} fn
+ * @param {Mixed} initial
+ *
+ * TODO: combatible error handling?
  */
-module.exports = asap;
-function asap(task) {
-    var rawTask;
-    if (freeTasks.length) {
-        rawTask = freeTasks.pop();
-    } else {
-        rawTask = new RawTask();
-    }
-    rawTask.task = task;
-    rawAsap(rawTask);
-}
 
-// We wrap tasks with recyclable task objects.  A task object implements
-// `call`, just like a function.
-function RawTask() {
-    this.task = null;
-}
+module.exports = function(arr, fn, initial){  
+  var idx = 0;
+  var len = arr.length;
+  var curr = arguments.length == 3
+    ? initial
+    : arr[idx++];
 
-// The sole purpose of wrapping the task is to catch the exception and recycle
-// the task object after its single use.
-RawTask.prototype.call = function () {
-    try {
-        this.task.call();
-    } catch (error) {
-        if (asap.onerror) {
-            // This hook exists purely for testing purposes.
-            // Its name will be periodically randomized to break any code that
-            // depends on its existence.
-            asap.onerror(error);
-        } else {
-            // In a web browser, exceptions are not fatal. However, to avoid
-            // slowing down the queue of pending tasks, we rethrow the error in a
-            // lower priority turn.
-            pendingErrors.push(error);
-            requestErrorThrow();
-        }
-    } finally {
-        this.task = null;
-        freeTasks[freeTasks.length] = this;
-    }
+  while (idx < len) {
+    curr = fn.call(null, curr, arr[idx], ++idx, arr);
+  }
+  
+  return curr;
 };
-
-},{"./raw":13}],13:[function(require,module,exports){
-(function (global){
-"use strict";
-
-// Use the fastest means possible to execute a task in its own turn, with
-// priority over other events including IO, animation, reflow, and redraw
-// events in browsers.
-//
-// An exception thrown by a task will permanently interrupt the processing of
-// subsequent tasks. The higher level `asap` function ensures that if an
-// exception is thrown by a task, that the task queue will continue flushing as
-// soon as possible, but if you use `rawAsap` directly, you are responsible to
-// either ensure that no exceptions are thrown from your task, or to manually
-// call `rawAsap.requestFlush` if an exception is thrown.
-module.exports = rawAsap;
-function rawAsap(task) {
-    if (!queue.length) {
-        requestFlush();
-        flushing = true;
-    }
-    // Equivalent to push, but avoids a function call.
-    queue[queue.length] = task;
-}
-
-var queue = [];
-// Once a flush has been requested, no further calls to `requestFlush` are
-// necessary until the next `flush` completes.
-var flushing = false;
-// `requestFlush` is an implementation-specific method that attempts to kick
-// off a `flush` event as quickly as possible. `flush` will attempt to exhaust
-// the event queue before yielding to the browser's own event loop.
-var requestFlush;
-// The position of the next task to execute in the task queue. This is
-// preserved between calls to `flush` so that it can be resumed if
-// a task throws an exception.
-var index = 0;
-// If a task schedules additional tasks recursively, the task queue can grow
-// unbounded. To prevent memory exhaustion, the task queue will periodically
-// truncate already-completed tasks.
-var capacity = 1024;
-
-// The flush function processes all tasks that have been scheduled with
-// `rawAsap` unless and until one of those tasks throws an exception.
-// If a task throws an exception, `flush` ensures that its state will remain
-// consistent and will resume where it left off when called again.
-// However, `flush` does not make any arrangements to be called again if an
-// exception is thrown.
-function flush() {
-    while (index < queue.length) {
-        var currentIndex = index;
-        // Advance the index before calling the task. This ensures that we will
-        // begin flushing on the next task the task throws an error.
-        index = index + 1;
-        queue[currentIndex].call();
-        // Prevent leaking memory for long chains of recursive calls to `asap`.
-        // If we call `asap` within tasks scheduled by `asap`, the queue will
-        // grow, but to avoid an O(n) walk for every task we execute, we don't
-        // shift tasks off the queue after they have been executed.
-        // Instead, we periodically shift 1024 tasks off the queue.
-        if (index > capacity) {
-            // Manually shift all values starting at the index back to the
-            // beginning of the queue.
-            for (var scan = 0, newLength = queue.length - index; scan < newLength; scan++) {
-                queue[scan] = queue[scan + index];
-            }
-            queue.length -= index;
-            index = 0;
-        }
-    }
-    queue.length = 0;
-    index = 0;
-    flushing = false;
-}
-
-// `requestFlush` is implemented using a strategy based on data collected from
-// every available SauceLabs Selenium web driver worker at time of writing.
-// https://docs.google.com/spreadsheets/d/1mG-5UYGup5qxGdEMWkhP6BWCz053NUb2E1QoUTU16uA/edit#gid=783724593
-
-// Safari 6 and 6.1 for desktop, iPad, and iPhone are the only browsers that
-// have WebKitMutationObserver but not un-prefixed MutationObserver.
-// Must use `global` instead of `window` to work in both frames and web
-// workers. `global` is a provision of Browserify, Mr, Mrs, or Mop.
-var BrowserMutationObserver = global.MutationObserver || global.WebKitMutationObserver;
-
-// MutationObservers are desirable because they have high priority and work
-// reliably everywhere they are implemented.
-// They are implemented in all modern browsers.
-//
-// - Android 4-4.3
-// - Chrome 26-34
-// - Firefox 14-29
-// - Internet Explorer 11
-// - iPad Safari 6-7.1
-// - iPhone Safari 7-7.1
-// - Safari 6-7
-if (typeof BrowserMutationObserver === "function") {
-    requestFlush = makeRequestCallFromMutationObserver(flush);
-
-// MessageChannels are desirable because they give direct access to the HTML
-// task queue, are implemented in Internet Explorer 10, Safari 5.0-1, and Opera
-// 11-12, and in web workers in many engines.
-// Although message channels yield to any queued rendering and IO tasks, they
-// would be better than imposing the 4ms delay of timers.
-// However, they do not work reliably in Internet Explorer or Safari.
-
-// Internet Explorer 10 is the only browser that has setImmediate but does
-// not have MutationObservers.
-// Although setImmediate yields to the browser's renderer, it would be
-// preferrable to falling back to setTimeout since it does not have
-// the minimum 4ms penalty.
-// Unfortunately there appears to be a bug in Internet Explorer 10 Mobile (and
-// Desktop to a lesser extent) that renders both setImmediate and
-// MessageChannel useless for the purposes of ASAP.
-// https://github.com/kriskowal/q/issues/396
-
-// Timers are implemented universally.
-// We fall back to timers in workers in most engines, and in foreground
-// contexts in the following browsers.
-// However, note that even this simple case requires nuances to operate in a
-// broad spectrum of browsers.
-//
-// - Firefox 3-13
-// - Internet Explorer 6-9
-// - iPad Safari 4.3
-// - Lynx 2.8.7
-} else {
-    requestFlush = makeRequestCallFromTimer(flush);
-}
-
-// `requestFlush` requests that the high priority event queue be flushed as
-// soon as possible.
-// This is useful to prevent an error thrown in a task from stalling the event
-// queue if the exception handled by Node.js’s
-// `process.on("uncaughtException")` or by a domain.
-rawAsap.requestFlush = requestFlush;
-
-// To request a high priority event, we induce a mutation observer by toggling
-// the text of a text node between "1" and "-1".
-function makeRequestCallFromMutationObserver(callback) {
-    var toggle = 1;
-    var observer = new BrowserMutationObserver(callback);
-    var node = document.createTextNode("");
-    observer.observe(node, {characterData: true});
-    return function requestCall() {
-        toggle = -toggle;
-        node.data = toggle;
-    };
-}
-
-// The message channel technique was discovered by Malte Ubl and was the
-// original foundation for this library.
-// http://www.nonblocking.io/2011/06/windownexttick.html
-
-// Safari 6.0.5 (at least) intermittently fails to create message ports on a
-// page's first load. Thankfully, this version of Safari supports
-// MutationObservers, so we don't need to fall back in that case.
-
-// function makeRequestCallFromMessageChannel(callback) {
-//     var channel = new MessageChannel();
-//     channel.port1.onmessage = callback;
-//     return function requestCall() {
-//         channel.port2.postMessage(0);
-//     };
-// }
-
-// For reasons explained above, we are also unable to use `setImmediate`
-// under any circumstances.
-// Even if we were, there is another bug in Internet Explorer 10.
-// It is not sufficient to assign `setImmediate` to `requestFlush` because
-// `setImmediate` must be called *by name* and therefore must be wrapped in a
-// closure.
-// Never forget.
-
-// function makeRequestCallFromSetImmediate(callback) {
-//     return function requestCall() {
-//         setImmediate(callback);
-//     };
-// }
-
-// Safari 6.0 has a problem where timers will get lost while the user is
-// scrolling. This problem does not impact ASAP because Safari 6.0 supports
-// mutation observers, so that implementation is used instead.
-// However, if we ever elect to use timers in Safari, the prevalent work-around
-// is to add a scroll event listener that calls for a flush.
-
-// `setTimeout` does not call the passed callback if the delay is less than
-// approximately 7 in web workers in Firefox 8 through 18, and sometimes not
-// even then.
-
-function makeRequestCallFromTimer(callback) {
-    return function requestCall() {
-        // We dispatch a timeout with a specified delay of 0 for engines that
-        // can reliably accommodate that request. This will usually be snapped
-        // to a 4 milisecond delay, but once we're flushing, there's no delay
-        // between events.
-        var timeoutHandle = setTimeout(handleTimer, 0);
-        // However, since this timer gets frequently dropped in Firefox
-        // workers, we enlist an interval handle that will try to fire
-        // an event 20 times per second until it succeeds.
-        var intervalHandle = setInterval(handleTimer, 50);
-
-        function handleTimer() {
-            // Whichever timer succeeds will cancel both timers and
-            // execute the callback.
-            clearTimeout(timeoutHandle);
-            clearInterval(intervalHandle);
-            callback();
-        }
-    };
-}
-
-// This is for `asap.js` only.
-// Its name will be periodically randomized to break any code that depends on
-// its existence.
-rawAsap.makeRequestCallFromTimer = makeRequestCallFromTimer;
-
-// ASAP was originally a nextTick shim included in Q. This was factored out
-// into this ASAP package. It was later adapted to RSVP which made further
-// amendments. These decisions, particularly to marginalize MessageChannel and
-// to capture the MutationObserver implementation in a closure, were integrated
-// back into ASAP proper.
-// https://github.com/tildeio/rsvp.js/blob/cddf7232546a9cf858524b75cde6f9edf72620a7/lib/rsvp/asap.js
-
-}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],14:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 /**
  * Module dependencies.
  */
 
 var Emitter = require('emitter');
 var reduce = require('reduce');
+var requestBase = require('./request-base');
+var isObject = require('./is-object');
 
 /**
  * Root reference for iframes.
@@ -10810,6 +11015,12 @@ function isHost(obj) {
 }
 
 /**
+ * Expose `request`.
+ */
+
+var request = module.exports = require('./request').bind(null, Request);
+
+/**
  * Determine XHR.
  */
 
@@ -10838,18 +11049,6 @@ request.getXHR = function () {
 var trim = ''.trim
   ? function(s) { return s.trim(); }
   : function(s) { return s.replace(/(^\s*|\s*$)/g, ''); };
-
-/**
- * Check if `obj` is an object.
- *
- * @param {Object} obj
- * @return {Boolean}
- * @api private
- */
-
-function isObject(obj) {
-  return obj === Object(obj);
-}
 
 /**
  * Serialize the given `obj`.
@@ -11155,6 +11354,9 @@ Response.prototype.setHeaderProperties = function(header){
 
 Response.prototype.parseBody = function(str){
   var parse = request.parse[this.type];
+  if (!parse && isJSON(this.type)) {
+    parse = request.parse['application/json'];
+  }
   return parse && str && (str.length || str instanceof Object)
     ? parse(str)
     : null;
@@ -11249,12 +11451,11 @@ request.Response = Response;
 
 function Request(method, url) {
   var self = this;
-  Emitter.call(this);
   this._query = this._query || [];
   this.method = method;
   this.url = url;
-  this.header = {};
-  this._header = {};
+  this.header = {}; // preserves header name case
+  this._header = {}; // coerces header names to lowercase
   this.on('end', function(){
     var err = null;
     var res = null;
@@ -11267,6 +11468,8 @@ function Request(method, url) {
       err.original = e;
       // issue #675: return the raw response if the response parsing fails
       err.rawResponse = self.xhr && self.xhr.responseText ? self.xhr.responseText : null;
+      // issue #876: return the http status code if the response parsing fails
+      err.statusCode = self.xhr && self.xhr.status ? self.xhr.status : null;
       return self.callback(err);
     }
 
@@ -11290,45 +11493,13 @@ function Request(method, url) {
 }
 
 /**
- * Mixin `Emitter`.
+ * Mixin `Emitter` and `requestBase`.
  */
 
 Emitter(Request.prototype);
-
-/**
- * Allow for extension
- */
-
-Request.prototype.use = function(fn) {
-  fn(this);
-  return this;
+for (var key in requestBase) {
+  Request.prototype[key] = requestBase[key];
 }
-
-/**
- * Set timeout to `ms`.
- *
- * @param {Number} ms
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.timeout = function(ms){
-  this._timeout = ms;
-  return this;
-};
-
-/**
- * Clear previous timeout.
- *
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.clearTimeout = function(){
-  this._timeout = 0;
-  clearTimeout(this._timer);
-  return this;
-};
 
 /**
  * Abort the request, and clear potential timeout.
@@ -11344,70 +11515,6 @@ Request.prototype.abort = function(){
   this.clearTimeout();
   this.emit('abort');
   return this;
-};
-
-/**
- * Set header `field` to `val`, or multiple fields with one object.
- *
- * Examples:
- *
- *      req.get('/')
- *        .set('Accept', 'application/json')
- *        .set('X-API-Key', 'foobar')
- *        .end(callback);
- *
- *      req.get('/')
- *        .set({ Accept: 'application/json', 'X-API-Key': 'foobar' })
- *        .end(callback);
- *
- * @param {String|Object} field
- * @param {String} val
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.set = function(field, val){
-  if (isObject(field)) {
-    for (var key in field) {
-      this.set(key, field[key]);
-    }
-    return this;
-  }
-  this._header[field.toLowerCase()] = val;
-  this.header[field] = val;
-  return this;
-};
-
-/**
- * Remove header `field`.
- *
- * Example:
- *
- *      req.get('/')
- *        .unset('User-Agent')
- *        .end(callback);
- *
- * @param {String} field
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.unset = function(field){
-  delete this._header[field.toLowerCase()];
-  delete this.header[field];
-  return this;
-};
-
-/**
- * Get case-insensitive header `field` value.
- *
- * @param {String} field
- * @return {String}
- * @api private
- */
-
-Request.prototype.getHeader = function(field){
-  return this._header[field.toLowerCase()];
 };
 
 /**
@@ -11438,16 +11545,22 @@ Request.prototype.type = function(type){
 };
 
 /**
- * Force given parser
+ * Set responseType to `val`. Presently valid responseTypes are 'blob' and 
+ * 'arraybuffer'.
  *
- * Sets the body parser no matter type.
+ * Examples:
  *
- * @param {Function}
+ *      req.get('/')
+ *        .responseType('blob')
+ *        .end(callback);
+ *
+ * @param {String} val
+ * @return {Request} for chaining
  * @api public
  */
 
-Request.prototype.parse = function(fn){
-  this._parser = fn;
+Request.prototype.responseType = function(val){
+  this._responseType = val;
   return this;
 };
 
@@ -11481,13 +11594,29 @@ Request.prototype.accept = function(type){
  *
  * @param {String} user
  * @param {String} pass
+ * @param {Object} options with 'type' property 'auto' or 'basic' (default 'basic')
  * @return {Request} for chaining
  * @api public
  */
 
-Request.prototype.auth = function(user, pass){
-  var str = btoa(user + ':' + pass);
-  this.set('Authorization', 'Basic ' + str);
+Request.prototype.auth = function(user, pass, options){
+  if (!options) {
+    options = {
+      type: 'basic'
+    }
+  }
+
+  switch (options.type) {
+    case 'basic':
+      var str = btoa(user + ':' + pass);
+      this.set('Authorization', 'Basic ' + str);
+    break;
+
+    case 'auto':
+      this.username = user;
+      this.password = pass;
+    break;
+  }
   return this;
 };
 
@@ -11512,28 +11641,6 @@ Request.prototype.query = function(val){
 };
 
 /**
- * Write the field `name` and `val` for "multipart/form-data"
- * request bodies.
- *
- * ``` js
- * request.post('/upload')
- *   .field('foo', 'bar')
- *   .end(callback);
- * ```
- *
- * @param {String} name
- * @param {String|Blob|File} val
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.field = function(name, val){
-  if (!this._formData) this._formData = new root.FormData();
-  this._formData.append(name, val);
-  return this;
-};
-
-/**
  * Queue the given `file` as an attachment to the specified `field`,
  * with optional `filename`.
  *
@@ -11551,9 +11658,15 @@ Request.prototype.field = function(name, val){
  */
 
 Request.prototype.attach = function(field, file, filename){
-  if (!this._formData) this._formData = new root.FormData();
-  this._formData.append(field, file, filename || file.name);
+  this._getFormData().append(field, file, filename || file.name);
   return this;
+};
+
+Request.prototype._getFormData = function(){
+  if (!this._formData) {
+    this._formData = new root.FormData();
+  }
+  return this._formData;
 };
 
 /**
@@ -11598,7 +11711,7 @@ Request.prototype.attach = function(field, file, filename){
 
 Request.prototype.send = function(data){
   var obj = isObject(data);
-  var type = this.getHeader('Content-Type');
+  var type = this._header['content-type'];
 
   // merge
   if (obj && isObject(this._data)) {
@@ -11607,7 +11720,7 @@ Request.prototype.send = function(data){
     }
   } else if ('string' == typeof data) {
     if (!type) this.type('form');
-    type = this.getHeader('Content-Type');
+    type = this._header['content-type'];
     if ('application/x-www-form-urlencoded' == type) {
       this._data = this._data
         ? this._data + '&' + data
@@ -11621,6 +11734,22 @@ Request.prototype.send = function(data){
 
   if (!obj || isHost(data)) return this;
   if (!type) this.type('json');
+  return this;
+};
+
+/**
+ * @deprecated
+ */
+Response.prototype.parse = function serialize(fn){
+  if (root.console) {
+    console.warn("Client-side parse() method has been renamed to serialize(). This method is not compatible with superagent v2.0");
+  }
+  this.serialize(fn);
+  return this;
+};
+
+Response.prototype.serialize = function serialize(fn){
+  this._parser = fn;
   return this;
 };
 
@@ -11759,7 +11888,11 @@ Request.prototype.end = function(fn){
   }
 
   // initiate request
-  xhr.open(this.method, this.url, true);
+  if (this.username && this.password) {
+    xhr.open(this.method, this.url, true, this.username, this.password);
+  } else {
+    xhr.open(this.method, this.url, true);
+  }
 
   // CORS
   if (this._withCredentials) xhr.withCredentials = true;
@@ -11767,7 +11900,7 @@ Request.prototype.end = function(fn){
   // body
   if ('GET' != this.method && 'HEAD' != this.method && 'string' != typeof data && !isHost(data)) {
     // serialize stuff
-    var contentType = this.getHeader('Content-Type');
+    var contentType = this._header['content-type'];
     var serialize = this._parser || request.serialize[contentType ? contentType.split(';')[0] : ''];
     if (!serialize && isJSON(contentType)) serialize = request.serialize['application/json'];
     if (serialize) data = serialize(data);
@@ -11779,6 +11912,10 @@ Request.prototype.end = function(fn){
     xhr.setRequestHeader(field, this.header[field]);
   }
 
+  if (this._responseType) {
+    xhr.responseType = this._responseType;
+  }
+
   // send stuff
   this.emit('request', this);
 
@@ -11788,54 +11925,12 @@ Request.prototype.end = function(fn){
   return this;
 };
 
-/**
- * Faux promise support
- *
- * @param {Function} fulfill
- * @param {Function} reject
- * @return {Request}
- */
-
-Request.prototype.then = function (fulfill, reject) {
-  return this.end(function(err, res) {
-    err ? reject(err) : fulfill(res);
-  });
-}
 
 /**
  * Expose `Request`.
  */
 
 request.Request = Request;
-
-/**
- * Issue a request:
- *
- * Examples:
- *
- *    request('GET', '/users').end(callback)
- *    request('/users').end(callback)
- *    request('/users', callback)
- *
- * @param {String} method
- * @param {String|Function} url or callback
- * @return {Request}
- * @api public
- */
-
-function request(method, url) {
-  // callback
-  if ('function' == typeof url) {
-    return new Request('GET', method).end(url);
-  }
-
-  // url first
-  if (1 == arguments.length) {
-    return new Request('GET', method);
-  }
-
-  return new Request(method, url);
-}
 
 /**
  * GET `url` with optional callback `fn(res)`.
@@ -11945,198 +12040,221 @@ request.put = function(url, data, fn){
   return req;
 };
 
+},{"./is-object":17,"./request":19,"./request-base":18,"emitter":5,"reduce":15}],17:[function(require,module,exports){
 /**
- * Expose `request`.
- */
-
-module.exports = request;
-
-},{"emitter":15,"reduce":16}],15:[function(require,module,exports){
-
-/**
- * Expose `Emitter`.
- */
-
-module.exports = Emitter;
-
-/**
- * Initialize a new `Emitter`.
- *
- * @api public
- */
-
-function Emitter(obj) {
-  if (obj) return mixin(obj);
-};
-
-/**
- * Mixin the emitter properties.
+ * Check if `obj` is an object.
  *
  * @param {Object} obj
- * @return {Object}
+ * @return {Boolean}
  * @api private
  */
 
-function mixin(obj) {
-  for (var key in Emitter.prototype) {
-    obj[key] = Emitter.prototype[key];
-  }
-  return obj;
+function isObject(obj) {
+  return null != obj && 'object' == typeof obj;
+}
+
+module.exports = isObject;
+
+},{}],18:[function(require,module,exports){
+/**
+ * Module of mixed-in functions shared between node and client code
+ */
+var isObject = require('./is-object');
+
+/**
+ * Clear previous timeout.
+ *
+ * @return {Request} for chaining
+ * @api public
+ */
+
+exports.clearTimeout = function _clearTimeout(){
+  this._timeout = 0;
+  clearTimeout(this._timer);
+  return this;
+};
+
+/**
+ * Force given parser
+ *
+ * Sets the body parser no matter type.
+ *
+ * @param {Function}
+ * @api public
+ */
+
+exports.parse = function parse(fn){
+  this._parser = fn;
+  return this;
+};
+
+/**
+ * Set timeout to `ms`.
+ *
+ * @param {Number} ms
+ * @return {Request} for chaining
+ * @api public
+ */
+
+exports.timeout = function timeout(ms){
+  this._timeout = ms;
+  return this;
+};
+
+/**
+ * Faux promise support
+ *
+ * @param {Function} fulfill
+ * @param {Function} reject
+ * @return {Request}
+ */
+
+exports.then = function then(fulfill, reject) {
+  return this.end(function(err, res) {
+    err ? reject(err) : fulfill(res);
+  });
 }
 
 /**
- * Listen on the given `event` with `fn`.
+ * Allow for extension
+ */
+
+exports.use = function use(fn) {
+  fn(this);
+  return this;
+}
+
+
+/**
+ * Get request header `field`.
+ * Case-insensitive.
  *
- * @param {String} event
- * @param {Function} fn
- * @return {Emitter}
+ * @param {String} field
+ * @return {String}
  * @api public
  */
 
-Emitter.prototype.on =
-Emitter.prototype.addEventListener = function(event, fn){
-  this._callbacks = this._callbacks || {};
-  (this._callbacks['$' + event] = this._callbacks['$' + event] || [])
-    .push(fn);
-  return this;
+exports.get = function(field){
+  return this._header[field.toLowerCase()];
 };
 
 /**
- * Adds an `event` listener that will be invoked a single
- * time then automatically removed.
+ * Get case-insensitive header `field` value.
+ * This is a deprecated internal API. Use `.get(field)` instead.
  *
- * @param {String} event
- * @param {Function} fn
- * @return {Emitter}
- * @api public
+ * (getHeader is no longer used internally by the superagent code base)
+ *
+ * @param {String} field
+ * @return {String}
+ * @api private
+ * @deprecated
  */
 
-Emitter.prototype.once = function(event, fn){
-  function on() {
-    this.off(event, on);
-    fn.apply(this, arguments);
-  }
-
-  on.fn = fn;
-  this.on(event, on);
-  return this;
-};
+exports.getHeader = exports.get;
 
 /**
- * Remove the given callback for `event` or all
- * registered callbacks.
+ * Set header `field` to `val`, or multiple fields with one object.
+ * Case-insensitive.
  *
- * @param {String} event
- * @param {Function} fn
- * @return {Emitter}
+ * Examples:
+ *
+ *      req.get('/')
+ *        .set('Accept', 'application/json')
+ *        .set('X-API-Key', 'foobar')
+ *        .end(callback);
+ *
+ *      req.get('/')
+ *        .set({ Accept: 'application/json', 'X-API-Key': 'foobar' })
+ *        .end(callback);
+ *
+ * @param {String|Object} field
+ * @param {String} val
+ * @return {Request} for chaining
  * @api public
  */
 
-Emitter.prototype.off =
-Emitter.prototype.removeListener =
-Emitter.prototype.removeAllListeners =
-Emitter.prototype.removeEventListener = function(event, fn){
-  this._callbacks = this._callbacks || {};
-
-  // all
-  if (0 == arguments.length) {
-    this._callbacks = {};
+exports.set = function(field, val){
+  if (isObject(field)) {
+    for (var key in field) {
+      this.set(key, field[key]);
+    }
     return this;
   }
-
-  // specific event
-  var callbacks = this._callbacks['$' + event];
-  if (!callbacks) return this;
-
-  // remove all handlers
-  if (1 == arguments.length) {
-    delete this._callbacks['$' + event];
-    return this;
-  }
-
-  // remove specific handler
-  var cb;
-  for (var i = 0; i < callbacks.length; i++) {
-    cb = callbacks[i];
-    if (cb === fn || cb.fn === fn) {
-      callbacks.splice(i, 1);
-      break;
-    }
-  }
+  this._header[field.toLowerCase()] = val;
+  this.header[field] = val;
   return this;
 };
 
 /**
- * Emit `event` with the given args.
+ * Remove header `field`.
+ * Case-insensitive.
  *
- * @param {String} event
- * @param {Mixed} ...
- * @return {Emitter}
+ * Example:
+ *
+ *      req.get('/')
+ *        .unset('User-Agent')
+ *        .end(callback);
+ *
+ * @param {String} field
  */
-
-Emitter.prototype.emit = function(event){
-  this._callbacks = this._callbacks || {};
-  var args = [].slice.call(arguments, 1)
-    , callbacks = this._callbacks['$' + event];
-
-  if (callbacks) {
-    callbacks = callbacks.slice(0);
-    for (var i = 0, len = callbacks.length; i < len; ++i) {
-      callbacks[i].apply(this, args);
-    }
-  }
-
+exports.unset = function(field){
+  delete this._header[field.toLowerCase()];
+  delete this.header[field];
   return this;
 };
 
 /**
- * Return array of callbacks for `event`.
+ * Write the field `name` and `val` for "multipart/form-data"
+ * request bodies.
  *
- * @param {String} event
- * @return {Array}
+ * ``` js
+ * request.post('/upload')
+ *   .field('foo', 'bar')
+ *   .end(callback);
+ * ```
+ *
+ * @param {String} name
+ * @param {String|Blob|File|Buffer|fs.ReadStream} val
+ * @return {Request} for chaining
+ * @api public
+ */
+exports.field = function(name, val) {
+  this._getFormData().append(name, val);
+  return this;
+};
+
+},{"./is-object":17}],19:[function(require,module,exports){
+// The node and browser modules expose versions of this with the
+// appropriate constructor function bound as first argument
+/**
+ * Issue a request:
+ *
+ * Examples:
+ *
+ *    request('GET', '/users').end(callback)
+ *    request('/users').end(callback)
+ *    request('/users', callback)
+ *
+ * @param {String} method
+ * @param {String|Function} url or callback
+ * @return {Request}
  * @api public
  */
 
-Emitter.prototype.listeners = function(event){
-  this._callbacks = this._callbacks || {};
-  return this._callbacks['$' + event] || [];
-};
-
-/**
- * Check if this emitter has `event` handlers.
- *
- * @param {String} event
- * @return {Boolean}
- * @api public
- */
-
-Emitter.prototype.hasListeners = function(event){
-  return !! this.listeners(event).length;
-};
-
-},{}],16:[function(require,module,exports){
-
-/**
- * Reduce `arr` with `fn`.
- *
- * @param {Array} arr
- * @param {Function} fn
- * @param {Mixed} initial
- *
- * TODO: combatible error handling?
- */
-
-module.exports = function(arr, fn, initial){  
-  var idx = 0;
-  var len = arr.length;
-  var curr = arguments.length == 3
-    ? initial
-    : arr[idx++];
-
-  while (idx < len) {
-    curr = fn.call(null, curr, arr[idx], ++idx, arr);
+function request(RequestConstructor, method, url) {
+  // callback
+  if ('function' == typeof url) {
+    return new RequestConstructor('GET', method).end(url);
   }
-  
-  return curr;
-};
+
+  // url first
+  if (2 == arguments.length) {
+    return new RequestConstructor('GET', method);
+  }
+
+  return new RequestConstructor(method, url);
+}
+
+module.exports = request;
+
 },{}]},{},[2]);
